@@ -1,0 +1,7 @@
+# Scalable Meeting Transcriber - Dependencies
+
+# Google Gemini API client
+google-generativeai>=0.3.0
+
+# Bundled ffmpeg for audio processing
+imageio-ffmpeg>=0.4.9
