@@ -671,6 +671,107 @@ def transcribe_all(
 
 
 # =============================================================================
+# Transcript Verifier Component
+# =============================================================================
+
+# Marker text that indicates a failed transcription
+FAILED_TRANSCRIPT_MARKERS = [
+    "As there is no audio file attached",
+    "sample transcription",
+    "I cannot transcribe a specific recording",
+    "I have provided a **sample transcription**"
+]
+
+
+def verify_transcript(result: TranscriptResult) -> bool:
+    """Verify that a transcript doesn't contain failure markers.
+    
+    Args:
+        result: TranscriptResult to verify
+        
+    Returns:
+        True if transcript is valid, False if it contains failure markers
+    """
+    if not result.success:
+        return False
+    
+    content_lower = result.text.lower()
+    for marker in FAILED_TRANSCRIPT_MARKERS:
+        if marker.lower() in content_lower:
+            return False
+    
+    return True
+
+
+def verify_and_fix_transcripts(
+    transcripts: List[TranscriptResult],
+    config: 'TranscribeConfig',
+    output_dir: str = "transcripts"
+) -> List[TranscriptResult]:
+    """Verify all transcripts and re-transcribe any that failed validation.
+    
+    Scans all transcripts for failure markers (placeholder text from API)
+    and re-transcribes any that are invalid.
+    
+    Args:
+        transcripts: List of TranscriptResult to verify
+        config: Transcription configuration for re-transcription
+        output_dir: Directory to save fixed transcript files
+        
+    Returns:
+        Updated list of TranscriptResult with fixed transcripts
+    """
+    print("\n[Verification] Checking transcripts for failures...")
+    
+    failed_transcripts = []
+    valid_transcripts = []
+    
+    for result in transcripts:
+        if verify_transcript(result):
+            valid_transcripts.append(result)
+        else:
+            failed_transcripts.append(result)
+    
+    if not failed_transcripts:
+        print("[Verification] All transcripts passed validation!")
+        return transcripts
+    
+    print(f"[Verification] Found {len(failed_transcripts)} invalid transcript(s):")
+    for result in failed_transcripts:
+        print(f"  - {result.chunk_info.path}")
+    
+    print("\n[Verification] Re-transcribing failed chunks...")
+    
+    fixed_results = []
+    for result in failed_transcripts:
+        chunk_info = result.chunk_info
+        print(f"  Re-transcribing: {chunk_info.path}")
+        
+        # Re-transcribe the chunk
+        new_result = transcribe_chunk(chunk_info, config)
+        
+        if new_result.success and verify_transcript(new_result):
+            # Save the fixed transcript
+            saved_path = save_transcript(new_result, output_dir)
+            if saved_path:
+                print(f"    Fixed: {saved_path}")
+            fixed_results.append(new_result)
+        else:
+            print(f"    Still failed: {new_result.error or 'Invalid content'}")
+            fixed_results.append(new_result)
+    
+    # Combine valid and fixed transcripts
+    all_results = valid_transcripts + fixed_results
+    all_results.sort(key=lambda r: (r.chunk_info.source_file, r.chunk_info.chunk_number))
+    
+    # Report final status
+    final_valid = sum(1 for r in all_results if verify_transcript(r))
+    print(f"\n[Verification] Final status: {final_valid}/{len(all_results)} valid transcripts")
+    
+    return all_results
+
+
+# =============================================================================
 # Consolidator Component
 # =============================================================================
 
@@ -952,7 +1053,7 @@ def run_pipeline(args) -> dict:
     # Step 1: Chunking
     # ==========================================================================
     if not args.skip_chunking:
-        print(f"[Step 1/3] Chunking {len(valid_files)} file(s)...")
+        print(f"[Step 1/4] Chunking {len(valid_files)} file(s)...")
         print("-" * 40)
         
         try:
@@ -968,7 +1069,7 @@ def run_pipeline(args) -> dict:
                 print("No chunks created. Aborting pipeline.")
                 return results
     else:
-        print("[Step 1/3] Skipping chunking (using existing chunks)...")
+        print("[Step 1/4] Skipping chunking (using existing chunks)...")
         # Load existing chunks from chunks directory
         chunks = load_existing_chunks(valid_files, chunk_config)
         results["chunks"] = chunks
@@ -984,7 +1085,7 @@ def run_pipeline(args) -> dict:
     # Step 2: Transcription
     # ==========================================================================
     if not args.skip_transcription:
-        print(f"[Step 2/3] Transcribing {len(results['chunks'])} chunk(s)...")
+        print(f"[Step 2/4] Transcribing {len(results['chunks'])} chunk(s)...")
         print("-" * 40)
         
         try:
@@ -1010,7 +1111,7 @@ def run_pipeline(args) -> dict:
             print(f"Error: {error_msg}")
             results["errors"].append(error_msg)
     else:
-        print("[Step 2/3] Skipping transcription (using existing transcripts)...")
+        print("[Step 2/4] Skipping transcription (using existing transcripts)...")
         # Load existing transcripts
         transcripts = load_existing_transcripts(results["chunks"], args.transcripts_dir)
         results["transcripts"] = transcripts
@@ -1023,9 +1124,23 @@ def run_pipeline(args) -> dict:
     print()
     
     # ==========================================================================
-    # Step 3: Consolidation
+    # Step 3: Verification & Auto-Fix
     # ==========================================================================
-    print("[Step 3/3] Consolidating transcripts...")
+    print("[Step 3/4] Verifying transcripts...")
+    print("-" * 40)
+    
+    results["transcripts"] = verify_and_fix_transcripts(
+        results["transcripts"],
+        transcribe_config,
+        args.transcripts_dir
+    )
+    
+    print()
+    
+    # ==========================================================================
+    # Step 4: Consolidation
+    # ==========================================================================
+    print("[Step 4/4] Consolidating transcripts...")
     print("-" * 40)
     
     try:
